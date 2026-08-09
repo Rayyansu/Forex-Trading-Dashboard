@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from core import ai_review, charts, metrics as M, storage
+import ai_review, charts, metrics as M, storage
 from core.schema import (
     EMOTION_VOCAB, MISTAKE_VOCAB, SETUP_VOCAB, enrich, load_csv, map_columns,
     normalise, to_export_frame,
