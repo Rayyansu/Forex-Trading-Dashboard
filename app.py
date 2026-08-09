@@ -29,21 +29,35 @@ from theme import PALETTE, css
 # --------------------------------------------------------------------------- #
 # Streamlit version compatibility
 # Streamlit is migrating from `use_container_width=True` to `width="stretch"`.
-# The two cannot be chosen by feature-detecting `width` alone: in older releases
-# `width` exists but expects an integer pixel value. So prefer the older keyword
-# while it is still accepted, and only switch once it disappears.
+# Feature-detecting the presence of `width` is not enough: older releases have a
+# `width` parameter that expects an integer pixel count and raises TypeError on
+# a string. The parameter's *default* is the reliable signal -- newer releases
+# default it to "stretch"/"content", older ones to None.
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=None)
 def fit(fn_name: str) -> dict:
     params = signature(getattr(st, fn_name)).parameters
+    width = params.get("width")
+    if width is not None and isinstance(width.default, str):
+        return {"width": "stretch"}
     if "use_container_width" in params:
         return {"use_container_width": True}
-    return {"width": "stretch"}
+    return {}
 
 
-def chart(fig) -> None:
-    """Full-width Plotly chart with the mode bar hidden."""
-    st.plotly_chart(fig, config={"displayModeBar": False}, **fit("plotly_chart"))
+def chart(fig, key: str) -> None:
+    """Full-width Plotly chart with the mode bar hidden.
+
+    `key` is mandatory and must be unique across the whole script. Streamlit
+    derives an element id from the call's arguments, so two charts that happen
+    to produce identical figures -- e.g. the "no data" placeholder rendered
+    twice on an empty journal -- collide with StreamlitDuplicateElementId. An
+    explicit key makes each element addressable regardless of its contents.
+    """
+    kwargs = dict(config={"displayModeBar": False}, **fit("plotly_chart"))
+    if "key" in signature(st.plotly_chart).parameters:
+        kwargs["key"] = key
+    st.plotly_chart(fig, **kwargs)
 
 
 def secret(name: str, default: str = "") -> str:
@@ -397,13 +411,13 @@ if page == "Dashboard":
 
     with left:
         panel("01", "Equity curve", "منحنى رأس المال")
-        st.plotly_chart(charts.equity_curve(eq, balance))
+        chart(charts.equity_curve(eq, balance), key="equity_curve")
 
         panel("02", "Underwater — depth below high-water mark", "التراجع تحت القمة")
-        chart(charts.underwater(eq))
+        chart(charts.underwater(eq), key="underwater")
 
         panel("03", "R-ribbon — every trade in sequence", "شريط المخاطرة لكل صفقة")
-        chart(charts.r_ribbon(fdf))
+        chart(charts.r_ribbon(fdf), key="r_ribbon")
         st.markdown(
             '<div class="note">Each tick is one trade in chronological order, '
             'height = realised R. Clusters of red are tilt; the tall green ticks are '
@@ -416,13 +430,14 @@ if page == "Dashboard":
                                  format_func=lambda s: {"net_pnl": "Net P&L",
                                                         "win_rate": "Win rate",
                                                         "trades": "Volume"}[s])
-        chart(charts.pnl_heatmap(M.heatmap_matrix(fdf, metric_choice), metric_choice))
+        chart(charts.pnl_heatmap(M.heatmap_matrix(fdf, metric_choice), metric_choice),
+              key="pnl_heatmap")
 
         panel("05", "Mistakes on losing trades", "الأخطاء في الصفقات الخاسرة")
-        chart(charts.mistake_pie(M.mistake_stats(fdf, losses_only=True)))
+        chart(charts.mistake_pie(M.mistake_stats(fdf, losses_only=True)), key="mistake_pie")
 
         panel("06", "Exposure by setup", "التوزيع حسب النموذج")
-        chart(charts.setup_donut(M.by_setup(fdf)))
+        chart(charts.setup_donut(M.by_setup(fdf)), key="setup_donut")
 
     panel("07", "Recent trades", "أحدث الصفقات")
     trade_table(fdf.head(400), height=340)
@@ -441,33 +456,33 @@ elif page == "Deep analytics":
         c1, c2 = st.columns(2, gap="medium")
         with c1:
             panel("A", "Net P&L by weekday", "الربح حسب اليوم")
-            chart(charts.bucket_bars(M.by_dow(fdf), x_title="Weekday"))
+            chart(charts.bucket_bars(M.by_dow(fdf), x_title="Weekday"), key="pnl_by_weekday")
         with c2:
             panel("B", "Net P&L by entry hour", "الربح حسب ساعة الدخول")
-            chart(charts.bucket_bars(M.by_hour(fdf), x_title="Hour"))
+            chart(charts.bucket_bars(M.by_hour(fdf), x_title="Hour"), key="pnl_by_hour")
 
         panel("C", "Session performance", "أداء الجلسات")
-        chart(charts.bucket_bars(M.by_session(fdf), height=260))
+        chart(charts.bucket_bars(M.by_session(fdf), height=260), key="pnl_by_session")
 
         panel("D", "Daily net P&L", "الربح اليومي")
-        chart(charts.daily_pnl_bars(M.daily_pnl(fdf)))
+        chart(charts.daily_pnl_bars(M.daily_pnl(fdf)), key="daily_pnl_bars")
 
     with t2:
         c1, c2 = st.columns(2, gap="medium")
         with c1:
             panel("E", "By instrument", "حسب الأداة")
-            chart(charts.bucket_bars(M.by_symbol(fdf)))
+            chart(charts.bucket_bars(M.by_symbol(fdf)), key="pnl_by_symbol")
             st.dataframe(M.by_symbol(fdf).round(2), hide_index=True, **fit("dataframe"))
         with c2:
             panel("F", "By setup", "حسب النموذج")
-            chart(charts.bucket_bars(M.by_setup(fdf)))
+            chart(charts.bucket_bars(M.by_setup(fdf)), key="pnl_by_setup")
             st.dataframe(M.by_setup(fdf).round(2), hide_index=True, **fit("dataframe"))
 
     with t3:
         c1, c2 = st.columns([1.2, 1], gap="medium")
         with c1:
             panel("G", "R-multiple distribution", "توزيع مضاعف المخاطرة")
-            chart(charts.r_distribution(fdf))
+            chart(charts.r_distribution(fdf), key="r_distribution")
             st.markdown(
                 '<div class="note">R = net P&L ÷ initial risk, where risk is derived from '
                 'the distance between entry and stop-loss valued at the trade\'s own implied '
@@ -475,7 +490,7 @@ elif page == "Deep analytics":
                 'are being cut early.</div>', unsafe_allow_html=True)
         with c2:
             panel("H", "Execution rating vs realised R", "التقييم مقابل النتيجة")
-            chart(charts.emotion_scatter(fdf))
+            chart(charts.emotion_scatter(fdf), key="emotion_scatter")
 
         panel("I", "Extremes", "القيم القصوى")
         cc = st.columns(4)
@@ -486,7 +501,7 @@ elif page == "Deep analytics":
 
     with t4:
         panel("J", "Rolling edge (20-trade window)", "الأداء المتحرك")
-        chart(charts.rolling_edge(M.rolling_metrics(fdf, 20)))
+        chart(charts.rolling_edge(M.rolling_metrics(fdf, 20)), key="rolling_edge")
         st.markdown(
             '<div class="note">Rolling expectancy is the honest health check: a strategy '
             'can stay net-positive for months while its 20-trade expectancy quietly trends '
@@ -516,7 +531,7 @@ elif page == "Psychology & AI review":
     left, right = st.columns([1, 1], gap="medium")
     with left:
         panel("01", "Performance by emotional state", "الأداء حسب الحالة النفسية")
-        chart(charts.bucket_bars(M.by_emotion(fdf)))
+        chart(charts.bucket_bars(M.by_emotion(fdf)), key="pnl_by_emotion")
     with right:
         panel("02", "Mistake cost ranking", "ترتيب الأخطاء حسب التكلفة")
         ms = M.mistake_stats(fdf, losses_only=False)
