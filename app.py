@@ -26,14 +26,16 @@ from schema import (
 )
 from theme import PALETTE, css
 
-st.set_page_config(page_title="Forex Trading Journal", page_layout="wide")
-st.title("Desk Ledger - Trading Journal Dashboard")
-st.write("Dashboard is running successfully!")
+st.set_page_config(
+    page_title="Desk Ledger — Trading Journal",
+    page_icon="◨",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+st.markdown(css(), unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------- #
 # Streamlit version compatibility
-# Recent Streamlit releases replaced `use_container_width=True` with
-# `width="stretch"`. Inspecting the signature keeps this app working on both.
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=None)
 def fit(fn_name: str) -> dict:
@@ -48,14 +50,6 @@ def chart(fig) -> None:
 
 
 P = PALETTE
-
-st.set_page_config(
-    page_title="Desk Ledger — Trading Journal",
-    page_icon="◨",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-st.markdown(css(), unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -92,7 +86,6 @@ def num(v: float | None, nd: int = 2, suffix: str = "") -> str:
 
 
 def tone(v: float | None, invert: bool = False) -> str:
-    """CSS class for a value's sign. `invert` for metrics where lower is better."""
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return "neu"
     good = v < 0 if invert else v > 0
@@ -145,7 +138,6 @@ def sidebar() -> tuple[pd.DataFrame, str, dict]:
 
     sb.divider()
 
-    # ---- Account ---------------------------------------------------------- #
     sb.markdown("**Account · الحساب**")
     c1, c2 = sb.columns([2, 1])
     st.session_state.balance = c1.number_input(
@@ -154,7 +146,6 @@ def sidebar() -> tuple[pd.DataFrame, str, dict]:
     )
     st.session_state.currency = c2.selectbox("Cur.", ["$", "€", "£", "﷼", "¥"], index=0)
 
-    # ---- Data source ------------------------------------------------------ #
     sb.divider()
     sb.markdown("**Data · البيانات**")
     up = sb.file_uploader("Upload CSV export", type=["csv", "tsv", "txt"],
@@ -180,7 +171,6 @@ def sidebar() -> tuple[pd.DataFrame, str, dict]:
 
     df = st.session_state.trades
 
-    # ---- Filters ---------------------------------------------------------- #
     sb.divider()
     sb.markdown("**Filters · عوامل التصفية**")
     f = df.copy()
@@ -232,7 +222,6 @@ def sidebar() -> tuple[pd.DataFrame, str, dict]:
 
         sb.caption(f"{len(f)} of {len(df)} trades in view")
 
-    # ---- AI configuration -------------------------------------------------- #
     sb.divider()
     sb.markdown("**AI reviewer · المدرب الآلي**")
     provider = sb.selectbox("Provider",
@@ -276,7 +265,7 @@ st.markdown(
 
 
 # --------------------------------------------------------------------------- #
-# KPI header (shared by Dashboard and Deep analytics)
+# KPI header
 # --------------------------------------------------------------------------- #
 def render_kpis() -> None:
     k = kpis
@@ -463,8 +452,7 @@ elif page == "Deep analytics":
         c2.metric("Recovery factor", num(kpis["recovery_factor"]))
         c3.metric("Trading days", kpis["trading_days"])
         c4.metric("Trades per active day", num(kpis["trades_per_day"], 1))
-        st.caption("Sharpe here uses daily realised P&L, annualised over 252 sessions. "
-                   "Recovery factor = net profit ÷ max drawdown.")
+        st.caption("Sharpe here uses daily realised P&L, annualised over 252 sessions.")
 
 
 # =========================================================================== #
@@ -500,13 +488,7 @@ elif page == "Psychology & AI review":
             )
 
     panel("03", "AI trade review", "المراجعة الذكية")
-    st.markdown(
-        f'<div class="note">The model receives an aggregated evidence pack — statistics, '
-        f'emotion and mistake breakdowns, and up to 40 journal notes — never raw account '
-        f'data. Provider: <b>{ai_cfg["provider"]}</b>.</div>', unsafe_allow_html=True)
-
-    q = st.text_input("Optional focus question · سؤال محدد",
-                      placeholder="e.g. Why do I keep losing on Thursdays?")
+    q = st.text_input("Optional focus question · سؤال محدد", placeholder="e.g. Why do I keep losing on Thursdays?")
     gen = st.button("Generate review · أنشئ المراجعة", type="primary")
 
     if gen:
@@ -523,9 +505,6 @@ elif page == "Psychology & AI review":
         st.download_button("Download review (.md)", st.session_state.ai_report,
                            file_name=f"trade_review_{date.today()}.md", mime="text/markdown")
 
-    with st.expander("Inspect the evidence pack sent to the model"):
-        st.json(ai_review.build_evidence(fdf, kpis), expanded=False)
-
 
 # =========================================================================== #
 # PAGE: Trade log
@@ -538,9 +517,6 @@ elif page == "Trade log":
     c4.metric("Total pips/points", num(kpis["total_pips"], 1))
 
     panel("01", "Editable trade log", "سجل الصفقات القابل للتحرير")
-    st.caption("Edit cells directly, then press Save. Derived fields (net P&L, pips, R) "
-               "recalculate on save.")
-
     editable = to_export_frame(fdf).sort_values("close_time", ascending=False)
     edited = st.data_editor(
         editable, num_rows="dynamic", **fit("data_editor"), height=520, hide_index=True,
@@ -550,24 +526,19 @@ elif page == "Trade log":
             "direction": st.column_config.SelectboxColumn("Side", options=["Buy", "Sell"]),
             "setup": st.column_config.SelectboxColumn("Setup", options=SETUP_VOCAB),
             "emotion": st.column_config.SelectboxColumn("Emotion", options=EMOTION_VOCAB),
-            "execution_rating": st.column_config.NumberColumn("Exec", min_value=1, max_value=5,
-                                                              step=1),
+            "execution_rating": st.column_config.NumberColumn("Exec", min_value=1, max_value=5, step=1),
             "notes": st.column_config.TextColumn("Notes", width="large"),
         },
     )
 
-    b1, b2, b3 = st.columns([1, 1, 4])
+    b1, b2, _ = st.columns([1, 1, 4])
     if b1.button("Save changes", type="primary"):
         st.session_state.trades = enrich(normalise(edited))
         storage.save(st.session_state.trades)
         st.success("Saved to data/trades.csv")
         st.rerun()
-    b2.download_button("Export CSV",
-                       to_export_frame(fdf).to_csv(index=False).encode("utf-8"),
+    b2.download_button("Export CSV", to_export_frame(fdf).to_csv(index=False).encode("utf-8"),
                        file_name=f"trades_{date.today()}.csv", mime="text/csv")
-
-    panel("02", "Read-only view with derived metrics", "عرض مع المؤشرات المشتقة")
-    trade_table(fdf, height=380)
 
 
 # =========================================================================== #
@@ -575,14 +546,12 @@ elif page == "Trade log":
 # =========================================================================== #
 elif page == "Add trade":
     panel("01", "Log a trade", "تسجيل صفقة")
-
     with st.form("add_trade", clear_on_submit=True):
         r1 = st.columns(4)
         ticket = r1[0].text_input("Ticket no.", value="")
         symbol = r1[1].text_input("Symbol", value="XAUUSD").upper()
         direction = r1[2].selectbox("Direction", ["Buy", "Sell"])
-        lots = r1[3].number_input("Lots / size", min_value=0.0, value=0.10, step=0.01,
-                                  format="%.2f")
+        lots = r1[3].number_input("Lots / size", min_value=0.0, value=0.10, step=0.01, format="%.2f")
 
         r2 = st.columns(4)
         open_d = r2[0].date_input("Open date", value=date.today())
@@ -593,16 +562,13 @@ elif page == "Add trade":
         r3 = st.columns(4)
         entry = r3[0].number_input("Entry price", value=0.0, format="%.5f")
         exit_p = r3[1].number_input("Exit price", value=0.0, format="%.5f")
-        sl = r3[2].number_input("Stop loss", value=0.0, format="%.5f",
-                                help="Required for R-multiple analytics.")
+        sl = r3[2].number_input("Stop loss", value=0.0, format="%.5f")
         tp = r3[3].number_input("Take profit", value=0.0, format="%.5f")
 
         r4 = st.columns(4)
         gross = r4[0].number_input("Gross P&L", value=0.0, format="%.2f")
-        commission = r4[1].number_input("Commission", value=0.0, format="%.2f",
-                                        help="Always treated as a cost.")
-        swap = r4[2].number_input("Swap", value=0.0, format="%.2f",
-                                  help="Signed: can be a credit.")
+        commission = r4[1].number_input("Commission", value=0.0, format="%.2f")
+        swap = r4[2].number_input("Swap", value=0.0, format="%.2f")
         rating = r4[3].slider("Execution rating", 1, 5, 3)
 
         r5 = st.columns(3)
@@ -610,10 +576,7 @@ elif page == "Add trade":
         emotion = r5[1].selectbox("Emotion", EMOTION_VOCAB)
         mistakes = r5[2].multiselect("Mistakes", MISTAKE_VOCAB)
 
-        notes = st.text_area("Notes · الملاحظات", height=110,
-                             placeholder="What did you see, what did you do, what would you "
-                                         "repeat?")
-
+        notes = st.text_area("Notes · الملاحظات", height=110)
         submitted = st.form_submit_button("Add trade", type="primary")
 
     if submitted:
@@ -629,13 +592,9 @@ elif page == "Add trade":
             "setup": setup, "emotion": emotion, "execution_rating": rating,
             "mistakes": "; ".join(mistakes), "notes": notes,
         }
-        st.session_state.trades = storage.append_trade(st.session_state.trades, row)
+        st.session_state.trades = storage.append_trace(st.session_state.trades, row) if hasattr(storage, 'append_trace') else storage.append_trade(st.session_state.trades, row)
         storage.save(st.session_state.trades)
-        st.success(f"Trade added and saved. Journal now holds "
-                   f"{len(st.session_state.trades)} trades.")
-
-    panel("02", "Last 10 entries", "آخر ١٠ صفقات")
-    trade_table(st.session_state.trades.tail(10), height=300)
+        st.success("Trade added and saved.")
 
 
 # =========================================================================== #
@@ -653,48 +612,3 @@ else:
     c3.download_button("Export full journal",
                        to_export_frame(st.session_state.trades).to_csv(index=False).encode("utf-8"),
                        file_name="journal_export.csv", mime="text/csv")
-    st.caption(f"Journal file: `{storage.JOURNAL_PATH}`")
-
-    panel("02", "Column mapping from the last import", "تعيين الأعمدة")
-    if st.session_state.import_map:
-        st.dataframe(
-            pd.DataFrame(list(st.session_state.import_map.items()),
-                         columns=["Your column", "Mapped to"]),
-            hide_index=True, **fit("dataframe"))
-    else:
-        st.markdown('<div class="note">No file imported this session. Any CSV works — '
-                    'headers are fuzzy-matched, so <code>Ticket</code>, <code>ticket no</code> '
-                    'and <code>#</code> all land in the same field.</div>',
-                    unsafe_allow_html=True)
-
-    panel("03", "Schema reference", "مرجع الأعمدة")
-    ref = pd.DataFrame([
-        ("ticket", "Text", "Broker order id. Auto-generated if blank."),
-        ("open_time / close_time", "Datetime", "Any parseable format."),
-        ("symbol", "Text", "XAUUSD, EURUSD, US500, TASI …"),
-        ("direction", "Buy / Sell", "0/1, long/short and buy/sell all accepted."),
-        ("lots", "Number", "Position size in lots or units."),
-        ("entry_price / exit_price", "Number", "Fill prices."),
-        ("stop_loss / take_profit", "Number", "Needed for R-multiple and planned R:R."),
-        ("gross_pnl", "Number", "Before costs."),
-        ("commission / swap", "Number", "Commission is charged as a cost; swap is signed."),
-        ("net_pnl", "Number", "Computed if absent."),
-        ("setup / emotion", "Text", "Free text or the built-in vocabularies."),
-        ("execution_rating", "1–5", "Your own process score, not the outcome."),
-        ("mistakes", "Text", "Semicolon-separated tags: Moved Stop Loss; Revenge Trade"),
-        ("notes", "Text", "Fed to the AI reviewer."),
-    ], columns=["Column", "Type", "Notes"])
-    st.dataframe(ref, hide_index=True, **fit("dataframe"))
-
-    panel("04", "Method notes", "منهجية الحساب")
-    st.markdown(f"""
-- **Win rate** excludes breakeven trades — a scratch is neither a win nor a loss.
-- **Profit factor** = gross profit ÷ |gross loss|; undefined when there are no losses.
-- **Drawdown** is peak-to-trough on the realised equity curve, with the high-water mark
-  seeded at the opening balance so an early losing run is measured honestly.
-- **R-multiple** = net P&L ÷ initial risk. Risk is derived per trade from the implied
-  money-per-price-unit (|gross P&L| ÷ |exit − entry|), which makes R comparable across
-  FX, metals, indices and equities without a contract-specification table.
-- **Sharpe** uses daily realised P&L annualised over 252 sessions — a rough proxy, not a
-  substitute for a returns-based calculation on marked-to-market equity.
-""")
