@@ -16,12 +16,15 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import streamlit as st
+
 import ai_review, charts, metrics as M, storage
-from core.schema import (
+from schema import (
     EMOTION_VOCAB, MISTAKE_VOCAB, SETUP_VOCAB, enrich, load_csv, map_columns,
     normalise, to_export_frame,
 )
-from core.theme import PALETTE, css
+from theme import PALETTE, css
+
 
 # --------------------------------------------------------------------------- #
 # Streamlit version compatibility
