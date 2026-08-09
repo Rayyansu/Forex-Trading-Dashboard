@@ -217,6 +217,102 @@ def test_promote_header_leaves_clean_files_alone():
     assert list(promote_header(clean).columns) == list(clean.columns)
 
 
+# --- MT5 "Trade History Report" quirks, reproduced from a real statement ---- #
+MT5_REPORT_HEAD = [
+    ["Trade History Report", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["Name:", "", "", "2127580", "", "", "", "", "", "", "", "", ""],
+    ["Account:", "", "", "5202548 (USD, Broker-Server, real, Hedge)", "", "", "",
+     "", "", "", "", "", ""],
+    ["Positions", "", "", "", "", "", "", "", "", "", "", "", ""],
+    # Both the open and close columns are called "Time"; both prices "Price".
+    ["Time", "Position", "Symbol", "Type", "Volume", "Price", "S / L", "T / P",
+     "Time", "Price", "Commission", "Swap", "Profit"],
+    ["2026.05.07 10:04:53", "137441792", "XAUUSD", "buy", "0.05", "4750.740", "",
+     "4776.692", "2026.05.15 15:11:11", "4539.475", "0", "-25.12", "-1 056.32"],
+    ["2026.05.15 01:46:06", "137603847", "XAUUSD", "sell", "0.06", "4655.975", "",
+     "4561.916", "2026.05.15 07:59:57", "4557.715", "0", "0", "589.56"],
+]
+MT5_NEXT_SECTION = [
+    ["Orders", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["Open Time", "Order", "Symbol", "Type", "Volume", "Price", "S / L", "T / P",
+     "Time", "State", "", "Comment", ""],
+    ["2026.05.15 01:46:06", "137603847", "XAUUSD", "sell", "0.06 / 0.06", "market",
+     "", "", "2026.05.15 01:46:06", "filled", "", "", ""],
+]
+
+
+def _mt5_csv() -> bytes:
+    rows = MT5_REPORT_HEAD + MT5_NEXT_SECTION
+    return "\n".join(",".join(f'"{c}"' for c in r) for r in rows).encode("utf-8")
+
+
+def _by_ticket(df: pd.DataFrame, ticket: str) -> pd.Series:
+    """Rows come back sorted by close time, so address them by ticket."""
+    match = df[df["ticket"] == ticket]
+    assert len(match) == 1, f"expected one row for {ticket}, got {len(match)}"
+    return match.iloc[0]
+
+
+def test_maps_bare_time_and_position_headers():
+    """MT5 names the ticket column "Position" and both time columns "Time"."""
+    df = enrich(normalise(read_table("report.csv", _mt5_csv())))
+    assert len(df) == 2
+    assert set(df["ticket"]) == {"137441792", "137603847"}
+    assert df["open_time"].notna().all(), "bare 'Time' header must map to open_time"
+    row = _by_ticket(df, "137441792")
+    # The duplicated header must resolve to the *pair*, not overwrite itself.
+    assert row["close_time"] > row["open_time"]
+    assert approx(float(row["entry_price"]), 4750.740)
+    assert approx(float(row["exit_price"]), 4539.475)
+
+
+def test_stops_at_the_end_of_the_first_section():
+    """Positions, Orders and Deals share one sheet; only the first is trades."""
+    df = enrich(normalise(read_table("report.csv", _mt5_csv())))
+    assert len(df) == 2, "rows from the Orders section leaked in"
+
+
+def test_thousands_separator_in_profit_is_parsed():
+    df = enrich(normalise(read_table("report.csv", _mt5_csv())))
+    assert approx(float(_by_ticket(df, "137441792")["gross_pnl"]), -1056.32)
+
+
+def test_numeric_cells_are_not_mistaken_for_headers():
+    """A row of pure numbers must score zero, or section-trimming eats the table."""
+    from schema import header_score
+    assert header_score(["2026.05.07 10:04:53", 137441792, "XAUUSD", "buy", 0.05]) == 0
+    assert header_score(["Time", "Position", "Symbol", "Type", "Volume"]) == 5
+
+
+def test_html_statement_with_layout_colspans():
+    """MT5 HTML pads each data row with one wide cell (spacer or EA comment).
+
+    Keeping it shifts every later value one column right, which silently turns
+    volume into a price. The trailing wide cell, however, is a real column.
+    """
+    header = MT5_REPORT_HEAD[4]
+    body = MT5_REPORT_HEAD[5:]
+    html = ["<html><body><table>"]
+    html.append("<tr>" + "".join(f"<td>{c}</td>" for c in header[:-1])
+                + f'<td colspan="2">{header[-1]}</td></tr>')
+    for i, row in enumerate(body):
+        comment = "" if i == 0 else "TM_SAT_835837093"
+        cells = "".join(f"<td>{c}</td>" for c in row[:4])
+        cells += f'<td colspan="8">{comment}</td>'          # the shifting culprit
+        cells += "".join(f"<td>{c}</td>" for c in row[4:-1])
+        cells += f'<td colspan="2">{row[-1]}</td>'
+        html.append(f"<tr>{cells}</tr>")
+    html.append("</table></body></html>")
+
+    df = enrich(normalise(read_table("r.htm", "".join(html).encode("utf-16"))))
+    assert len(df) == 2
+    row = _by_ticket(df, "137441792")
+    assert approx(float(row["lots"]), 0.05), "columns shifted by the spacer cell"
+    assert approx(float(row["entry_price"]), 4750.740)
+    assert approx(float(row["exit_price"]), 4539.475)
+    assert set(df["symbol"]) == {"XAUUSD"}
+
+
 def test_reads_excel_and_html_statements():
     """MT4/MT5 default report formats, not just CSV."""
     base = pd.read_csv(StringIO(MT5_ROWS))
