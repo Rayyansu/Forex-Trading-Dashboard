@@ -10,12 +10,13 @@ Run either way:
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from io import BytesIO, StringIO
 
 import numpy as np
 import pandas as pd
 
 import metrics as M
-from schema import enrich, normalise
+from schema import enrich, normalise, promote_header, read_table
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +167,77 @@ def test_weekday_buckets_are_calendar_ordered():
 
 def test_sharpe_is_nan_on_tiny_samples():
     assert np.isnan(M.compute_kpis(make_frame([1.0, 2.0]), 1_000)["sharpe"])
+
+
+# --------------------------------------------------------------------------- #
+# Ingestion: the shapes real broker exports actually arrive in
+# --------------------------------------------------------------------------- #
+MT5_ROWS = (
+    "Ticket,Open Time,Type,Volume,Item,Price,S/L,T/P,Close Time,Price,Commission,Swap,Profit\n"
+    "50231,2026.03.02 09:14,buy,0.20,XAUUSD,2338.40,2331.20,2352.80,"
+    "2026.03.02 11:02,2349.10,-7.00,-1.20,214.00\n"
+    "50232,2026.03.02 14:31,sell,0.10,EURUSD,1.08920,1.09180,1.08400,"
+    "2026.03.02 16:45,1.09180,-3.50,0.40,-26.00\n"
+)
+
+
+def test_reads_plain_csv_export():
+    raw = read_table("statement.csv", MT5_ROWS.encode("utf-8"))
+    df = enrich(normalise(raw))
+    assert len(df) == 2
+    assert set(df["symbol"]) == {"XAUUSD", "EURUSD"}
+    # MT5 repeats the "Price" header; the second one must become the exit price.
+    assert approx(float(df.loc[df.ticket == "50231", "exit_price"].iloc[0]), 2349.10)
+
+
+def test_reads_utf8_bom_and_windows_arabic_encodings():
+    """Statements exported from an Arabic Windows locale are not UTF-8."""
+    for encoding in ("utf-8-sig", "cp1256", "utf-16"):
+        payload = MT5_ROWS.replace("XAUUSD", "ذهب").encode(encoding)
+        raw = read_table("statement.csv", payload)
+        assert len(raw) == 2, f"failed on {encoding}"
+
+
+def test_reads_semicolon_delimited_export():
+    """European locales export with ';' rather than ','."""
+    raw = read_table("statement.csv", MT5_ROWS.replace(",", ";").encode("utf-8"))
+    assert raw.shape[1] >= 12
+
+
+def test_skips_title_block_above_the_header_row():
+    """MT4/MT5 statements open with account and broker lines."""
+    preamble = "Trade History Report\n\nAccount: 5123998\nBroker: Example Ltd\n\n"
+    raw = read_table("statement.csv", (preamble + MT5_ROWS).encode("utf-8"))
+    df = enrich(normalise(raw))
+    assert len(df) == 2
+
+
+def test_promote_header_leaves_clean_files_alone():
+    clean = pd.DataFrame({"Ticket": [1], "Symbol": ["XAUUSD"], "Open Time": ["2026-01-01"]})
+    assert list(promote_header(clean).columns) == list(clean.columns)
+
+
+def test_reads_excel_and_html_statements():
+    """MT4/MT5 default report formats, not just CSV."""
+    base = pd.read_csv(StringIO(MT5_ROWS))
+
+    buf = BytesIO()
+    base.to_excel(buf, index=False)
+    assert len(enrich(normalise(read_table("s.xlsx", buf.getvalue())))) == 2
+
+    html = ("<html><body><h1>Trade History Report</h1>"
+            "<table><tr><td>Account</td><td>5123998</td></tr></table>"
+            + base.to_html(index=False) + "</body></html>")
+    assert len(enrich(normalise(read_table("s.htm", html.encode("utf-8"))))) == 2
+
+
+def test_unreadable_file_raises_a_useful_message():
+    try:
+        read_table("photo.csv", b"\x00\x01\x02 not a table at all")
+    except ValueError as exc:
+        assert "table" in str(exc).lower()
+    else:
+        raise AssertionError("expected a ValueError")
 
 
 # --------------------------------------------------------------------------- #
