@@ -72,10 +72,17 @@ _INDEX_HINTS = ("US30", "US500", "SPX", "NAS", "GER", "DAX", "UK100", "JP225",
 # --------------------------------------------------------------------------- #
 ALIASES: dict[str, str] = {}
 
+# Columns brokers repeat under one name. When a header maps to a target that is
+# already taken, the second occurrence falls through to its partner: MT5 uses
+# "Time" twice (open, close) and "Price" twice (entry, exit).
+PAIRED_COLUMNS = {"entry_price": "exit_price", "open_time": "close_time"}
+
 
 def _register(canonical: str, aliases: Iterable[str]) -> None:
     for a in aliases:
-        ALIASES[_key(a)] = canonical
+        key = _key(a)
+        if key:          # a header like "#" normalises to "" and would match everything
+            ALIASES[key] = canonical
 
 
 def _key(s: str) -> str:
@@ -84,9 +91,11 @@ def _key(s: str) -> str:
 
 
 _register("ticket", ["ticket", "ticket no", "ticket number", "id", "order", "deal",
-                     "trade id", "order id", "#"])
+                     "trade id", "order id", "position", "position id"])
+# MT5 labels both the open and close columns simply "Time"; pandas de-duplicates
+# the second to "Time.1", which the paired-column rule below sends to close_time.
 _register("open_time", ["open time", "open", "entry time", "time open", "open date",
-                        "entry date", "datetime", "date", "opened"])
+                        "entry date", "datetime", "date", "time", "opened"])
 _register("close_time", ["close time", "close", "exit time", "time close",
                          "close date", "exit date", "closed"])
 _register("symbol", ["symbol", "item", "instrument", "pair", "asset", "market", "ticker"])
@@ -136,20 +145,32 @@ def map_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
     """
     mapping: dict[str, str] = {}
     used: set[str] = set()
-    for col in df.columns:
-        key = _key(col)
-        # pandas renames duplicate headers ("Price", "Price.1"). MT5 statements
-        # rely on that duplication, so fall back to the de-suffixed key.
-        target = ALIASES.get(key) or ALIASES.get(re.sub(r"\d+$", "", key))
-        # First alias wins: MT5 exports repeat "Price" for entry and exit.
+    targets: list[str | None] = []
+
+    # Resolution is positional, not by label: an Excel/HTML statement can carry
+    # two columns literally named "Time", and renaming by label would collapse
+    # both onto the same canonical field.
+    for position, col in enumerate(df.columns):
+        target = resolve_alias(col)
+        chosen: str | None = None
         if target and target not in used:
-            mapping[col] = target
-            used.add(target)
-        elif target == "entry_price" and "exit_price" not in used:
-            # Second "Price" column in an MT5 statement is the close price.
-            mapping[col] = "exit_price"
-            used.add("exit_price")
-    return df.rename(columns=mapping), mapping
+            chosen = target
+        elif target in PAIRED_COLUMNS and PAIRED_COLUMNS[target] not in used:
+            # Second occurrence of a repeated header is its partner:
+            # Time -> close_time, Price -> exit_price.
+            chosen = PAIRED_COLUMNS[target]
+
+        targets.append(chosen)
+        if chosen:
+            used.add(chosen)
+            label = str(col)
+            if label in mapping:                     # keep both rows visible in the UI
+                label = f"{label} ({position + 1})"
+            mapping[label] = chosen
+
+    out = df.copy()
+    out.columns = [t if t else f"unmapped_{i}" for i, t in enumerate(targets)]
+    return out, mapping
 
 
 def _normalise_direction(value) -> str:
@@ -193,6 +214,15 @@ def normalise(df_raw: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].astype(str).str.strip().replace({"nan": ""})
         else:
             df[col] = df[col].fillna("").astype(str).str.strip()
+
+    # Some journals label the Buy/Sell column "Position", which the alias table
+    # reads as the ticket id. If the ticket values are actually directions and
+    # no direction column was found, move them across.
+    ticket_vals = df["ticket"].astype(str).str.strip().str.lower()
+    looks_directional = ticket_vals.isin({"buy", "sell", "long", "short"}).mean() > 0.8
+    if looks_directional and df["direction"].astype(str).str.strip().eq("").all():
+        df["direction"] = df["ticket"]
+        df["ticket"] = ""
 
     df["direction"] = df["direction"].map(_normalise_direction)
     df["symbol"] = df["symbol"].str.upper().replace({"": "UNKNOWN"})
@@ -342,10 +372,25 @@ def load_csv(path_or_buffer) -> pd.DataFrame:
 ENCODINGS = ("utf-8-sig", "utf-8", "utf-16", "cp1256", "cp1252", "latin-1")
 
 
+def resolve_alias(label) -> str | None:
+    """Map one header label onto a canonical column, or None.
+
+    The de-suffixed retry exists because pandas renames duplicate headers
+    ("Time" -> "Time.1"), which MT5 statements rely on.
+    """
+    key = _key(label)
+    if not key:
+        return None
+    target = ALIASES.get(key)
+    if target:
+        return target
+    base = re.sub(r"\d+$", "", key)
+    return ALIASES.get(base) if base else None
+
+
 def header_score(values) -> int:
     """How many cells in a row look like known column headers."""
-    return sum(1 for v in values if _key(v) in ALIASES
-               or ALIASES.get(re.sub(r"\d+$", "", _key(v))))
+    return sum(1 for v in values if resolve_alias(v))
 
 
 def promote_header(df: pd.DataFrame, max_scan: int = 12) -> pd.DataFrame:
@@ -398,6 +443,27 @@ def sniff_header(text: str, max_scan: int = 30) -> tuple[str, int, int]:
     return best
 
 
+def trim_section(df: pd.DataFrame) -> pd.DataFrame:
+    """Cut a multi-section report down to the first table.
+
+    An MT5 "Trade History Report" stacks Positions, Orders and Deals into one
+    sheet, separated by a marker row holding a single cell, and ends with a
+    summary block. Reading past the first section produces rows whose columns
+    mean something entirely different, so stop at the first row that is either
+    almost empty or looks like a fresh header.
+    """
+    if df.empty:
+        return df
+
+    for i in range(len(df)):
+        row = df.iloc[i].tolist()
+        filled = [v for v in row
+                  if str(v).strip().lower() not in ("", "nan", "none", "nat")]
+        if len(filled) <= 2 or header_score(row) >= 3:
+            return df.iloc[:i]
+    return df
+
+
 def _read_csv_bytes(data: bytes) -> pd.DataFrame:
     """Try every plausible encoding, then locate the header, then parse."""
     errors: list[str] = []
@@ -431,26 +497,65 @@ def _read_csv_bytes(data: bytes) -> pd.DataFrame:
 
 
 def _read_html_bytes(data: bytes) -> pd.DataFrame:
-    """Pick the table in an MT4/MT5 HTML statement that looks most like trades."""
-    last: Exception | None = None
-    for flavor in ("lxml", "bs4"):
-        for enc in ENCODINGS:
-            try:
-                tables = pd.read_html(io.BytesIO(data), flavor=flavor, encoding=enc)
-            except Exception as exc:  # noqa: BLE001 - flavour may not be installed
-                last = exc
-                continue
-            if tables:
-                # Score every table by how many real headers it can expose.
-                scored = [(header_score(promote_header(t).columns), t) for t in tables]
-                score, best = max(scored, key=lambda pair: pair[0])
-                if score >= 3:
-                    return best
-                return max(tables, key=lambda t: t.shape[0] * t.shape[1])
-    raise ValueError(
-        "Could not read the HTML statement. Install `lxml` or `beautifulsoup4` "
-        f"+ `html5lib`, or re-export as CSV. ({last})"
-    )
+    """Parse an MT4/MT5 HTML statement from the DOM, one cell per <td>.
+
+    `pandas.read_html` expands `colspan`, which these reports use purely for
+    layout: a header row of 13 cells becomes 22 columns while data rows expand
+    differently, so nothing lines up. Reading the cells directly keeps every row
+    at its true width.
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError as exc:
+        raise ValueError(
+            "Reading HTML statements needs `beautifulsoup4` — add it to "
+            "requirements.txt, or export the report as CSV/XLSX instead."
+        ) from exc
+
+    text = None
+    for enc in ENCODINGS:
+        try:
+            text = data.decode(enc)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        raise ValueError("Could not decode the HTML file with any known encoding.")
+
+    soup = BeautifulSoup(text, "html.parser")
+    best: tuple[int, pd.DataFrame] | None = None
+
+    for table in soup.find_all("table"):
+        rows: list[list[str]] = []
+        for tr in table.find_all("tr"):
+            cells_raw = tr.find_all(["td", "th"])
+            cells = []
+            for position, c in enumerate(cells_raw):
+                span = c.get("colspan")
+                is_last = position == len(cells_raw) - 1
+                # MT5 injects one wide cell mid-row (an empty spacer, or the
+                # position comment such as "TM_SAT_835837093"). It has no
+                # counterpart in the header, so keeping it shifts every value
+                # after it one column right. A trailing wide cell, by contrast,
+                # is a real column -- the header's own "Profit" carries
+                # colspan="2" -- so only mid-row spans are dropped.
+                if span and str(span) != "1" and not is_last:
+                    continue
+                cells.append(c.get_text(" ", strip=True))
+            if cells:
+                rows.append(cells)
+        if not rows:
+            continue
+
+        width = max(len(r) for r in rows)
+        frame = pd.DataFrame([r + [""] * (width - len(r)) for r in rows])
+        score = header_score(promote_header(frame).columns)
+        if best is None or score > best[0]:
+            best = (score, frame)
+
+    if best is None:
+        raise ValueError("No tables found in the HTML file.")
+    return best[1]
 
 
 def read_table(filename: str, data: bytes) -> pd.DataFrame:
@@ -481,6 +586,7 @@ def read_table(filename: str, data: bytes) -> pd.DataFrame:
 
     raw = promote_header(raw)
     raw = raw.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    raw = trim_section(raw)
     return raw.reset_index(drop=True)
 
 
