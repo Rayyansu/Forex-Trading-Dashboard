@@ -7,7 +7,6 @@ Run locally:
 """
 from __future__ import annotations
 
-import io
 from functools import lru_cache
 from inspect import signature
 from datetime import date, datetime, time, timedelta
@@ -21,8 +20,8 @@ import charts
 import metrics as M
 import storage
 from schema import (
-    EMOTION_VOCAB, MISTAKE_VOCAB, SETUP_VOCAB, enrich, load_csv, map_columns,
-    normalise, to_export_frame,
+    EMOTION_VOCAB, MISTAKE_VOCAB, SETUP_VOCAB, enrich, map_columns, normalise,
+    read_table, to_export_frame,
 )
 from theme import PALETTE, css
 
@@ -112,6 +111,8 @@ def init_state() -> None:
     st.session_state.setdefault("currency", "$")
     st.session_state.setdefault("ai_report", "")
     st.session_state.setdefault("import_map", {})
+    st.session_state.setdefault("last_upload", None)
+    st.session_state.setdefault("import_status", None)
 
 
 init_state()
@@ -198,25 +199,63 @@ def sidebar() -> tuple[pd.DataFrame, str, dict]:
     # ---- Data source ------------------------------------------------------ #
     sb.divider()
     sb.markdown("**Data · البيانات**")
-    up = sb.file_uploader("Upload CSV export", type=["csv", "tsv", "txt"],
-                          help="MT4/MT5/cTrader exports are auto-mapped.")
-    if up is not None and sb.button("Import file", **fit("button")):
-        try:
-            raw = pd.read_csv(io.BytesIO(up.getvalue()), sep=None, engine="python")
-            _, mapping = map_columns(raw)
-            st.session_state.trades = enrich(normalise(raw))
-            st.session_state.import_map = mapping
-            sb.success(f"Imported {len(st.session_state.trades)} trades.")
+    # The uploader imports as soon as a file lands: an extra "Import" button
+    # only rendered *after* selection was easy to miss, which read as "the
+    # upload does nothing". Re-importing the same file is prevented by
+    # fingerprinting name + size rather than by a click.
+    up = sb.file_uploader(
+        "Upload broker export",
+        type=["csv", "tsv", "txt", "xlsx", "xlsm", "xls", "htm", "html"],
+        key="uploader",
+        help="MT4/MT5/cTrader exports. CSV, Excel or HTML statements all work; "
+             "columns are auto-mapped.",
+    )
+
+    if up is not None:
+        data = up.getvalue()
+        fingerprint = f"{up.name}:{len(data)}"
+        if st.session_state.get("last_upload") != fingerprint:
+            try:
+                raw = read_table(up.name, data)
+                _, mapping = map_columns(raw)
+                if not mapping:
+                    raise ValueError(
+                        "No recognisable trade columns were found. Detected "
+                        f"headers: {', '.join(map(str, raw.columns[:12]))}"
+                    )
+                trades = enrich(normalise(raw))
+                if trades.empty:
+                    raise ValueError(
+                        "Columns mapped, but no row had a readable open time. "
+                        "Check the date format in the file."
+                    )
+                st.session_state.trades = trades
+                st.session_state.import_map = mapping
+                st.session_state.last_upload = fingerprint
+                st.session_state.import_status = (
+                    "ok", f"Imported {len(trades)} trades from {up.name} "
+                          f"({len(mapping)} columns mapped).")
+            except Exception as exc:  # noqa: BLE001 - report, never crash
+                st.session_state.last_upload = fingerprint
+                st.session_state.import_status = ("error", f"{up.name}: {exc}")
             st.rerun()
-        except Exception as exc:  # noqa: BLE001
-            sb.error(f"Could not read that file — {exc}")
+
+    status = st.session_state.get("import_status")
+    if status:
+        kind, message = status
+        (sb.success if kind == "ok" else sb.error)(message)
+        if kind == "error":
+            sb.caption("Data & settings → Column mapping shows what was detected.")
 
     b1, b2 = sb.columns(2)
     if b1.button("Load sample", **fit("button")):
         st.session_state.trades = storage.load_sample()
+        st.session_state.import_status = None
         st.rerun()
     if b2.button("Clear all", **fit("button")):
         st.session_state.trades = enrich(normalise(pd.DataFrame()))
+        st.session_state.import_status = None
+        st.session_state.import_map = {}
         st.rerun()
 
     df = st.session_state.trades
