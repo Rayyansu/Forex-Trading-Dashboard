@@ -225,9 +225,19 @@ def sidebar() -> tuple[pd.DataFrame, str, dict]:
                     )
                 trades = enrich(normalise(raw))
                 if trades.empty:
+                    # Name what is actually missing: "check the date format" is
+                    # misleading when the real problem is that no column mapped
+                    # to open_time at all.
+                    missing = [c for c in ("open_time", "symbol")
+                               if c not in mapping.values()]
+                    if missing:
+                        raise ValueError(
+                            f"No column mapped to {', '.join(missing)}. Detected "
+                            f"headers: {', '.join(map(str, raw.columns[:12]))}"
+                        )
                     raise ValueError(
-                        "Columns mapped, but no row had a readable open time. "
-                        "Check the date format in the file."
+                        "Columns mapped, but no row had a readable date in the "
+                        "open-time column. Check the date format in the file."
                     )
                 st.session_state.trades = trades
                 st.session_state.import_map = mapping
