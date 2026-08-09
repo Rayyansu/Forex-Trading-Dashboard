@@ -25,10 +25,18 @@ chart has data on the first run. Clear it from the sidebar and import your own
 CSV whenever you're ready.
 
 ```bash
-python test_metrics.py            # 14 tests, no pytest needed
-pytest -q                         # same tests, if you prefer pytest
-python generate_sample_data.py 53 # rebuild the demo journal (any integer seed)
+python -m compileall -q .          # catches syntax errors in every file, instantly
+python test_metrics.py             # 14 tests on the quantitative layer
+python test_app.py                 # 5 end-to-end tests: every page, real render
+pytest -q                          # all of the above, if you prefer pytest
+python generate_sample_data.py 53  # rebuild the demo journal (any integer seed)
 ```
+
+**Run those three before every push.** `test_app.py` uses Streamlit's own
+`AppTest` runner, which executes the script with a real script-run context — the
+only way to catch errors that exist solely at render time, such as
+`StreamlitDuplicateElementId`. Importing the app or eyeballing the code will not
+find them.
 
 ---
 
@@ -47,7 +55,8 @@ fx-trading-journal/
 ├── storage.py                 # CSV persistence
 ├── theme.py                   # palette, CSS, Plotly template
 ├── generate_sample_data.py    # demo journal generator
-├── test_metrics.py            # tests for the quantitative layer
+├── test_metrics.py            # unit tests for the quantitative layer
+├── test_app.py                # end-to-end render tests (Streamlit AppTest)
 ├── requirements.txt           # pinned
 ├── .gitignore
 ├── .streamlit/config.toml     # dark theme
@@ -278,5 +287,13 @@ view`; stacked filters reach zero quickly.
 
 **Saving does nothing on the hosted app** — expected; the filesystem is
 ephemeral. Use Export CSV.
+
+**`StreamlitDuplicateElementId`** — two elements were created with identical
+arguments, so Streamlit derived the same internal id for both. Every chart in
+this app passes a unique `key`; if you add one, give it a key too, and
+`test_app.py::test_chart_keys_are_unique` will hold you to it. This surfaces most
+often on an *empty* journal, where several charts fall back to the same "no data"
+placeholder figure — which is also a hint that `data/sample_trades.csv` never
+made it into the repo.
 
 **Port already in use** — `streamlit run app.py --server.port 8502`.
