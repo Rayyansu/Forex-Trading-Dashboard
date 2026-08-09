@@ -17,6 +17,7 @@ Quant conventions used here (documented once, applied everywhere):
 """
 from __future__ import annotations
 
+import io
 import re
 from typing import Iterable
 
@@ -326,7 +327,161 @@ def split_tags(value) -> list[str]:
 def load_csv(path_or_buffer) -> pd.DataFrame:
     """Read a CSV/TSV export and return an enriched canonical frame."""
     df = pd.read_csv(path_or_buffer, sep=None, engine="python")
-    return enrich(normalise(df))
+    return enrich(normalise(promote_header(df)))
+
+
+# --------------------------------------------------------------------------- #
+# Tolerant file reading
+# --------------------------------------------------------------------------- #
+# Real broker exports are messier than a clean CSV: Windows-Arabic encodings,
+# semicolon delimiters from European locales, a title/account block above the
+# real header row, and MT4/MT5's default HTML or XLSX report formats. Each of
+# those looks to the user like "the upload does not work", so all of them are
+# handled here rather than rejected.
+
+ENCODINGS = ("utf-8-sig", "utf-8", "utf-16", "cp1256", "cp1252", "latin-1")
+
+
+def header_score(values) -> int:
+    """How many cells in a row look like known column headers."""
+    return sum(1 for v in values if _key(v) in ALIASES
+               or ALIASES.get(re.sub(r"\d+$", "", _key(v))))
+
+
+def promote_header(df: pd.DataFrame, max_scan: int = 12) -> pd.DataFrame:
+    """Find the real header row when the export starts with a title block.
+
+    MT4/MT5 statements often open with account name, broker and date lines. If
+    the current columns don't look like headers but a row further down does,
+    that row is promoted and everything above it is dropped.
+    """
+    if df.empty:
+        return df
+    if header_score(df.columns) >= 3:
+        return df
+
+    best_row, best = None, 2  # require a clearly better candidate
+    for i in range(min(max_scan, len(df))):
+        score = header_score(df.iloc[i].tolist())
+        if score > best:
+            best_row, best = i, score
+
+    if best_row is None:
+        return df
+
+    out = df.iloc[best_row + 1:].copy()
+    out.columns = [str(c).strip() for c in df.iloc[best_row].tolist()]
+    return out.dropna(axis=1, how="all").reset_index(drop=True)
+
+
+def sniff_header(text: str, max_scan: int = 30) -> tuple[str, int, int]:
+    """Locate the delimiter and the header line in raw text.
+
+    Delimiter auto-detection has to happen *after* the header is found, not
+    before: a statement whose first line reads "Trade History Report" will
+    otherwise be sniffed as whitespace-delimited and parsed into nonsense. So
+    every (delimiter, line) pair is scored by how many known column names the
+    split produces, and the best pair wins.
+
+    Returns (delimiter, line_index_of_header, score).
+    """
+    lines = text.splitlines()[:max_scan]
+    best = (",", 0, 0)
+    for sep in (",", ";", "\t", "|"):
+        for i, line in enumerate(lines):
+            cells = line.split(sep)
+            if len(cells) < 3:
+                continue
+            score = header_score(cells)
+            if score > best[2]:
+                best = (sep, i, score)
+    return best
+
+
+def _read_csv_bytes(data: bytes) -> pd.DataFrame:
+    """Try every plausible encoding, then locate the header, then parse."""
+    errors: list[str] = []
+    for enc in ENCODINGS:
+        try:
+            text = data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if not text.strip():
+            continue
+
+        sep, header_line, score = sniff_header(text)
+        attempts = ([(sep, header_line)] if score >= 3 else []) + \
+                   [(None, 0), (",", 0), (";", 0), ("\t", 0), ("|", 0)]
+
+        for use_sep, skip in attempts:
+            try:
+                df = pd.read_csv(io.StringIO(text), sep=use_sep, engine="python",
+                                 skiprows=skip, skip_blank_lines=True)
+            except Exception as exc:  # noqa: BLE001 - try the next combination
+                errors.append(f"{enc}/{use_sep or 'auto'}: {exc}")
+                continue
+            if df.shape[1] >= 3 and len(df) > 0:
+                return df
+
+    raise ValueError(
+        "Could not parse the file as a table with any recognisable columns. "
+        f"Tried encodings: {', '.join(ENCODINGS)}. "
+        f"Last errors: {'; '.join(errors[-2:]) or 'none'}"
+    )
+
+
+def _read_html_bytes(data: bytes) -> pd.DataFrame:
+    """Pick the table in an MT4/MT5 HTML statement that looks most like trades."""
+    last: Exception | None = None
+    for flavor in ("lxml", "bs4"):
+        for enc in ENCODINGS:
+            try:
+                tables = pd.read_html(io.BytesIO(data), flavor=flavor, encoding=enc)
+            except Exception as exc:  # noqa: BLE001 - flavour may not be installed
+                last = exc
+                continue
+            if tables:
+                # Score every table by how many real headers it can expose.
+                scored = [(header_score(promote_header(t).columns), t) for t in tables]
+                score, best = max(scored, key=lambda pair: pair[0])
+                if score >= 3:
+                    return best
+                return max(tables, key=lambda t: t.shape[0] * t.shape[1])
+    raise ValueError(
+        "Could not read the HTML statement. Install `lxml` or `beautifulsoup4` "
+        f"+ `html5lib`, or re-export as CSV. ({last})"
+    )
+
+
+def read_table(filename: str, data: bytes) -> pd.DataFrame:
+    """Read an uploaded broker export of any common format into a raw frame.
+
+    Accepts CSV/TSV/TXT, Excel and HTML statements. Returns the frame *before*
+    normalisation so the caller can show the user which columns were detected.
+    """
+    ext = str(filename).lower().rsplit(".", 1)[-1] if "." in str(filename) else ""
+
+    if ext in {"xlsx", "xlsm", "xls"}:
+        try:
+            raw = pd.read_excel(io.BytesIO(data))
+        except ImportError as exc:
+            raise ValueError(
+                "Reading Excel needs `openpyxl` — add it to requirements.txt, "
+                "or re-export the statement as CSV."
+            ) from exc
+    elif ext in {"htm", "html"}:
+        raw = _read_html_bytes(data)
+    else:
+        raw = _read_csv_bytes(data)
+
+    # Flatten the MultiIndex columns pandas builds from merged HTML/Excel headers.
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = [" ".join(str(p) for p in col if str(p) != "nan").strip()
+                       for col in raw.columns]
+
+    raw = promote_header(raw)
+    raw = raw.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    return raw.reset_index(drop=True)
 
 
 def to_export_frame(df: pd.DataFrame) -> pd.DataFrame:
