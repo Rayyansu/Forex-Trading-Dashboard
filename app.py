@@ -26,6 +26,10 @@ from schema import (
 )
 from theme import PALETTE, css
 
+st.set_page_config(page_title="Forex Trading Journal", page_layout="wide")
+st.title("Desk Ledger - Trading Journal Dashboard")
+st.write("Dashboard is running successfully!")
+
 # --------------------------------------------------------------------------- #
 # Streamlit version compatibility
 # Recent Streamlit releases replaced `use_container_width=True` with
