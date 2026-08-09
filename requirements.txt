@@ -9,3 +9,8 @@ numpy>=1.26
 plotly>=5.24
 requests>=2.31
 
+# Broker statements are not always CSV. These are pure-Python and build
+# anywhere; drop them only if you will exclusively upload CSV files.
+openpyxl>=3.1          # .xlsx / .xlsm statements
+beautifulsoup4>=4.12   # .htm / .html statements (MT4/MT5 default report)
+html5lib>=1.1          # parser backend for the above
